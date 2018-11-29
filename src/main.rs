@@ -27,10 +27,9 @@ use lr::{SGDOptions,Sparse,learn,test,ClassWeight,LearningRule,VWRule};
 #[derive(Serialize,Deserialize,Clone)]
 pub struct MySparse(pub usize, pub Vec<usize>, pub Vec<f32>);
 
-fn load_data(path: &str, dims: usize, partitions: usize) -> DiskCollection<(Vec<(usize, f64)>, bool)> {
+fn load_data(path: &str, dims: usize, chunk_size: u64) -> DiskCollection<(Vec<(usize, f64)>, bool)> {
     let md = fs::metadata(path).expect("Error reading file!");
-    let chunk_size = ((md.len() as f64) / (partitions as f64)) as u64;
-    let col = read_text(path, chunk_size + 1).expect("File missing!");
+    let col = read_text(path, chunk_size).expect("File missing!");
     let sd = SparseData(dims);
     //let mut training_data = col.emit(move |s, emitter| {
     col.emit_to_disk("/tmp/par-lr".into(), move |s, emitter| {
@@ -47,13 +46,14 @@ fn main() {
     env_logger::init();
     let path: String = args().skip(1).next().unwrap();
     let dims: usize = args().skip(2).next().unwrap().parse().unwrap();
-    let partitions: usize = args().skip(3).next().unwrap().parse().ok().unwrap();
+    let chunk_size: u64 = args().skip(3).next().unwrap().parse().ok().unwrap();
     let test_file: Option<String> = args().skip(4).next();
 
-    let training_data = load_data(&path, dims, partitions);
+    let training_data = load_data(&path, dims, chunk_size);
+    println!("Number of parallel partitions: {}", training_data.n_partitions());
 
     let test_data = if let Some(test_path) = test_file {
-        load_data(&test_path, dims, partitions)
+        load_data(&test_path, dims, chunk_size)
     } else {
         training_data.clone()
     };
@@ -62,7 +62,8 @@ fn main() {
     let mut w = Deferred::lift(vec![0f64; dims], None);
 
     let mut errors = Vec::new();
-    for pass in 0..(partitions as u64){
+    let mut best_w = Vec::new();
+    for pass in 0..20 {
         //let alpha = 0.5 / ((pass + 2) as f64).ln();
         let alpha = 0.5;
         let mut opts = SGDOptions::new(1, 2)
@@ -116,19 +117,36 @@ fn main() {
 
         let sum = tree_reduce(&misclass, |left, right| left + right).unwrap();
         let n = misclass.len();
-        errors.push(sum.apply(move |s| {
+        let cur_error = sum.apply(move |s| {
             let err = s / (n as f64);
             vec![(pass, err)]
+        });
+        best_w.push(cur_error.join(&w, |err, cur_w| {
+            (err[0].1, cur_w.clone())
         }));
+        errors.push(cur_error);
     }
 
+    // Select best W
+    let best = tree_reduce(&best_w, |left, right| {
+        if left.0 < right.0 {
+            left.clone()
+        } else {
+            right.clone()
+        }
+    }).unwrap();
+
+    let output = MemoryCollection::from_defs(errors)
+        .split(1).to_defs()[0].join(&best, |errors, b| {
+        (errors.clone(), b.clone())
+    });
+
     let gs = GreedyScheduler::new();
-    //gs.set_threads(1);
-    //let gs = LeveledScheduler;
-    if let Some(results) = MemoryCollection::from_defs(errors).run(&gs) {
+    if let Some((results, (best, w))) = output.run(&gs) {
         for (p, err) in results {
             println!("Pass: {}, Error: {}", p, err);
         }
+        println!("Best: {}", best);
     }
 
 }
