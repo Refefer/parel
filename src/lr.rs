@@ -104,7 +104,7 @@ impl SGDOptions {
 pub type Sparse = Vec<(usize, f64)>;
 
 #[allow(non_snake_case)]
-pub fn learn(w: &mut Vec<f64>, Xy: Vec<(Sparse, bool)>, options: &SGDOptions) -> f64 {
+pub fn learn(w: &mut Vec<f64>, Xy: Vec<(Sparse, bool)>, options: &SGDOptions) -> () {
 
     let mut lr = options.learning_rule.clone();
 
@@ -120,12 +120,7 @@ pub fn learn(w: &mut Vec<f64>, Xy: Vec<(Sparse, bool)>, options: &SGDOptions) ->
     // Importance weights - We use inverse proportion to scale the pos/negative weights
     let (mut p_w, mut n_w) = match options.class_weight {
         ClassWeight::None => (1f64, 1f64),
-        ClassWeight::Inverse => {
-            let p_count: f64 = Xy.iter().map(|x| if x.1 {1.} else {0.}).sum();
-            let p_w = len as f64 / (2. * p_count);
-            let n_w = len as f64 / (2. * (len as f64 - p_count));
-            (p_w, n_w)
-        },
+        ClassWeight::Inverse => compute_balanced_weight(&Xy),
         ClassWeight::Fixed(p_w, n_w) => (p_w, n_w)
     };
 
@@ -140,7 +135,6 @@ pub fn learn(w: &mut Vec<f64>, Xy: Vec<(Sparse, bool)>, options: &SGDOptions) ->
     for iter in 0..iters {
         grads.clear();
         logloss = 0.;
-        c = 0.;
         // Get random batch
         // update weights
         let alpha = lr.get_lr();
@@ -159,12 +153,6 @@ pub fn learn(w: &mut Vec<f64>, Xy: Vec<(Sparse, bool)>, options: &SGDOptions) ->
                 Sigmoid::Normal => sigmoid(dot(Xi, &w))
             };
 
-            if iter + 1 == iters {
-                let ll = log_loss(yi, clip(y_hat));
-                logloss += ll;
-                c += 1f64;
-            }
-
             let denom = alpha * iw * (y_hat - yi);
 
             for &(idx, xi) in Xi.iter() {
@@ -177,9 +165,9 @@ pub fn learn(w: &mut Vec<f64>, Xy: Vec<(Sparse, bool)>, options: &SGDOptions) ->
             w[idx as usize] -= g;
         }
     }
-    logloss / c
 }
 
+/*
 #[allow(non_snake_case)]
 pub fn _learn(w: &mut Vec<f64>, Xy: Vec<(Sparse, bool)>, options: &SGDOptions) -> f64 {
 
@@ -192,12 +180,7 @@ pub fn _learn(w: &mut Vec<f64>, Xy: Vec<(Sparse, bool)>, options: &SGDOptions) -
     // Importance weights - We use inverse proportion to scale the pos/negative weights
     let (mut p_w, mut n_w) = match options.class_weight {
         ClassWeight::None => (1f64, 1f64),
-        ClassWeight::Inverse => {
-            let p_count: f64 = Xy.iter().map(|x| if x.1 {1.} else {0.}).sum();
-            let p_w = len as f64 / (2. * p_count);
-            let n_w = len as f64 / (2. * (len as f64 - p_count));
-            (p_w, n_w)
-        },
+        ClassWeight::Inverse => compute_balanced_weight(&Xy),
         ClassWeight::Fixed(p_w, n_w) => (p_w, n_w)
     };
 
@@ -232,7 +215,7 @@ pub fn _learn(w: &mut Vec<f64>, Xy: Vec<(Sparse, bool)>, options: &SGDOptions) -
                 }
 
                 for &(idx, xi) in Xi.iter() {
-                    let g = (y_hat - yi) * xi; //* iw;
+                    let g = (y_hat - yi) * xi; // * iw;
                     grads[idx] += g;
                 }
             }
@@ -244,6 +227,8 @@ pub fn _learn(w: &mut Vec<f64>, Xy: Vec<(Sparse, bool)>, options: &SGDOptions) -
     }
     logloss / c
 }
+
+*/
 
 pub fn test(w: &Vec<f64>, xy: &Vec<(Sparse, bool)>) -> (f64, f64) {
     let mut misclass = 0;
@@ -292,12 +277,32 @@ fn log_loss(y: f64, y_hat: f64) -> f64 {
 
 #[inline]
 pub fn dot(x: &Sparse, w: &Vec<f64>) -> f64 {
-    x.iter().map(|(ref idx, ref xi)| xi * w[*idx as usize]).sum()
-    /*
+    //x.iter().map(|(ref idx, ref xi)| xi * w[*idx as usize]).sum()
     let mut sum = 0f64;
     for &(ref idx, ref xi) in x.iter() {
         sum += xi * w[*idx as usize];
     }
     sum
-    */
+}
+
+#[allow(non_snake_case)]
+fn compute_balanced_weight<A>(Xy: &[(A, bool)]) -> (f64, f64) {
+    let len = Xy.len();
+    let p_count: f64 = Xy.iter().map(|x| if x.1 {1.} else {0.}).sum();
+    let p_w = len as f64 / (2. * p_count);
+    let n_w = len as f64 / (2. * (len as f64 - p_count));
+    (p_w, n_w)
+}
+
+#[cfg(test)]
+mod def_test {
+    use super::*;
+
+    #[test]
+    fn test_balanced_weight() {
+        let v = vec![(1, true), (2, true), (3, true), (4, false)];
+        let (p_w, n_w) = compute_balanced_weight(&v);
+        assert_eq!(p_w, 2. / 3.);
+        assert_eq!(n_w, 2.);
+    }
 }
