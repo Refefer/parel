@@ -2,6 +2,8 @@
 extern crate rand;
 extern crate core;
 
+use std::arch::x86_64::*;
+use std::mem;
 use std::collections::HashMap;
 use std::f64::consts::E;
 use self::rand::prelude::*;
@@ -127,14 +129,11 @@ pub fn learn(w: &mut Vec<f64>, Xy: Vec<(Sparse, bool)>, options: &SGDOptions) ->
     p_w *= scale;
     n_w *= scale;
 
-    let mut logloss = 0f64;
-    let mut c = 0f64;
     let mut idxs: Vec<_> = (0usize..len).collect();
     let mut cur_idx = 0usize;
     let mut rng = XorShiftRng::seed_from_u64(options.seed);
-    for iter in 0..iters {
+    for _iter in 0..iters {
         grads.clear();
-        logloss = 0.;
         // Get random batch
         // update weights
         let alpha = lr.get_lr();
@@ -277,13 +276,40 @@ fn log_loss(y: f64, y_hat: f64) -> f64 {
 
 #[inline]
 pub fn dot(x: &Sparse, w: &Vec<f64>) -> f64 {
-    //x.iter().map(|(ref idx, ref xi)| xi * w[*idx as usize]).sum()
     let mut sum = 0f64;
     for &(ref idx, ref xi) in x.iter() {
         sum += xi * w[*idx as usize];
     }
     sum
 }
+
+/*
+/// AVX based dot product
+pub fn dot(x: &[(usize, f64)], w: &[f64]) -> f64 {
+    let mut sum = 0.0;
+    let mut i = 0;
+    unsafe {
+        if x.len() >= 4 { 
+            let mut sv = _mm256_setzero_pd();
+            while i < (x.len() - 4) {
+                let l = _mm256_set_pd(x[i].1, x[i+1].1, x[i+2].1, x[i+3].1); 
+                let r = _mm256_set_pd(w[x[i].0], w[x[i+1].0], w[x[i+2].0], w[x[i+3].0]); 
+                sv = _mm256_fmadd_pd(l, r, sv);
+                i += 4;
+            }
+            let mut extract: [f64; 4] = mem::uninitialized();
+            _mm256_store_pd(&extract[0] as *const f64, sv);
+            sum = extract[0] + extract[1] + extract[2] + extract[3];
+        }
+    }
+
+    // Remainder
+    for i in i..x.len() {
+        sum += x[i].1 * w[x[i].0];
+    }
+    sum 
+}
+*/
 
 #[allow(non_snake_case)]
 fn compute_balanced_weight<A>(Xy: &[(A, bool)]) -> (f64, f64) {
