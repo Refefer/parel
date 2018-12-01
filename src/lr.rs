@@ -106,12 +106,12 @@ impl SGDOptions {
 pub type Sparse = Vec<(usize, f64)>;
 
 #[allow(non_snake_case)]
-pub fn learn(w: &mut Vec<f64>, Xy: Vec<(Sparse, bool)>, options: &SGDOptions) -> () {
+pub fn learn(w: &mut Vec<f64>, input: &Vec<(Sparse, bool)>, options: &SGDOptions) -> () {
 
     let mut lr = options.learning_rule.clone();
 
     // filter out empty vecs
-    let Xy: Vec<_> = Xy.into_iter().filter(|x| (x.0).len() > 0).collect();
+    let Xy: Vec<_> = input.iter().filter(|x| (x.0).len() > 0).collect();
     let len = Xy.len();
     let mut grads = Vec::new();
     let scale = 1f64 / options.batch_size as f64;
@@ -274,8 +274,17 @@ fn log_loss(y: f64, y_hat: f64) -> f64 {
     if out.is_nan() { 0. } else {out}
 }
 
+pub fn dot(x: &Sparse, w: &[f64]) -> f64 {
+    if is_x86_feature_detected!("avx") {
+        unsafe { dot_avx(x, w) }
+    } else {
+        dot_basic(x, w)
+    }
+
+}
+
 #[inline]
-pub fn dot(x: &Sparse, w: &Vec<f64>) -> f64 {
+fn dot_basic(x: &Sparse, w: &[f64]) -> f64 {
     let mut sum = 0f64;
     for &(ref idx, ref xi) in x.iter() {
         sum += xi * w[*idx as usize];
@@ -283,24 +292,22 @@ pub fn dot(x: &Sparse, w: &Vec<f64>) -> f64 {
     sum
 }
 
-/*
 /// AVX based dot product
-pub fn dot(x: &[(usize, f64)], w: &[f64]) -> f64 {
+#[target_feature(enable = "avx")]
+unsafe fn dot_avx(x: &[(usize, f64)], w: &[f64]) -> f64 {
     let mut sum = 0.0;
     let mut i = 0;
-    unsafe {
-        if x.len() >= 4 { 
-            let mut sv = _mm256_setzero_pd();
-            while i < (x.len() - 4) {
-                let l = _mm256_set_pd(x[i].1, x[i+1].1, x[i+2].1, x[i+3].1); 
-                let r = _mm256_set_pd(w[x[i].0], w[x[i+1].0], w[x[i+2].0], w[x[i+3].0]); 
-                sv = _mm256_fmadd_pd(l, r, sv);
-                i += 4;
-            }
-            let mut extract: [f64; 4] = mem::uninitialized();
-            _mm256_store_pd(&extract[0] as *const f64, sv);
-            sum = extract[0] + extract[1] + extract[2] + extract[3];
+    if x.len() >= 4 { 
+        let mut sv = _mm256_setzero_pd();
+        while i < (x.len() - 4) {
+            let l = _mm256_set_pd(x[i].1, x[i+1].1, x[i+2].1, x[i+3].1); 
+            let r = _mm256_set_pd(w[x[i].0], w[x[i+1].0], w[x[i+2].0], w[x[i+3].0]); 
+            sv = _mm256_fmadd_pd(l, r, sv);
+            i += 4;
         }
+        let mut extract: [f64; 4] = mem::uninitialized();
+        _mm256_store_pd(&extract[0] as *const f64, sv);
+        sum = extract[0] + extract[1] + extract[2] + extract[3];
     }
 
     // Remainder
@@ -309,10 +316,9 @@ pub fn dot(x: &[(usize, f64)], w: &[f64]) -> f64 {
     }
     sum 
 }
-*/
 
 #[allow(non_snake_case)]
-fn compute_balanced_weight<A>(Xy: &[(A, bool)]) -> (f64, f64) {
+fn compute_balanced_weight<A>(Xy: &[&(A, bool)]) -> (f64, f64) {
     let len = Xy.len();
     let p_count: f64 = Xy.iter().map(|x| if x.1 {1.} else {0.}).sum();
     let p_w = len as f64 / (2. * p_count);

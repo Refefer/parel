@@ -1,6 +1,8 @@
-extern crate serde;
 #[macro_use]
-extern crate serde_derive;
+extern crate clap;
+
+#[macro_use]
+extern crate log;
 extern crate tange;
 extern crate tange_collection;
 extern crate svmloader;
@@ -12,6 +14,7 @@ use std::env::args;
 use std::sync::Arc;
 use std::fs;
 
+use clap::{Arg, App, SubCommand, ArgMatches};
 use tange::deferred::{Deferred, tree_reduce};
 use tange::scheduler::GreedyScheduler;
 use tange::scheduler::LeveledScheduler;
@@ -22,10 +25,61 @@ use tange_collection::collection::disk::DiskCollection;
 use svmloader::types::SparseData;
 use svmloader::*;
 
-use lr::{SGDOptions,Sparse,learn,test,ClassWeight,LearningRule,VWRule};
+use lr::{SGDOptions,Sparse,learn,test,ClassWeight,LearningRule,VWRule,dot};
+fn parse<'a>() -> ArgMatches<'a> {
+  App::new("par-lr")
+    .version("0.0.1")
+    .author("Andrew S. <refefer@gmail.com>")
+    .about("Parallel Logistic Regression")
+    .arg(Arg::with_name("train")
+        .index(1)
+        .required(true)
+        .help("Training File"))
+    .arg(Arg::with_name("dims")
+        .long("dims")
+        .short("d")
+        .takes_value(true)
+        .required(true)
+        .help("Number of dimensions of the data"))
+    .arg(Arg::with_name("valid")
+        .long("validation")
+        .short("v")
+        .takes_value(true)
+        .help("Validation file"))
+    .arg(Arg::with_name("test")
+        .long("test")
+        .short("t")
+        .takes_value(true)
+        .help("test file"))
 
-#[derive(Serialize,Deserialize,Clone)]
-pub struct MySparse(pub usize, pub Vec<usize>, pub Vec<f32>);
+    .arg(Arg::with_name("learning_rate")
+        .long("learning-rate")
+        .short("lr")
+        .takes_value(true)
+        .help("Set the learning rate"))
+    .arg(Arg::with_name("passes")
+        .long("passes")
+        .short("N")
+        .takes_value(true)
+        .help("Number of passes to perform"))
+    .arg(Arg::with_name("batch_size")
+        .long("batch-size")
+        .short("b")
+        .takes_value(true)
+        .help("Batch size"))
+    .arg(Arg::with_name("train-iters")
+        .long("train-iters")
+        .short("i")
+        .takes_value(true)
+        .help("Number of epochs for an inner pass"))
+    .arg(Arg::with_name("chunk_size")
+        .long("chunk-size")
+        .short("c")
+        .takes_value(true)
+        .help("Partition size to use for dataset"))
+    .get_matches()
+}
+
 
 fn load_data(path: &str, dims: usize, chunk_size: u64) -> DiskCollection<(Vec<(usize, f64)>, bool)> {
     let md = fs::metadata(path).expect("Error reading file!");
@@ -44,29 +98,38 @@ fn load_data(path: &str, dims: usize, chunk_size: u64) -> DiskCollection<(Vec<(u
 
 fn main() {
     env_logger::init();
-    let path: String = args().skip(1).next().unwrap();
-    let dims: usize = args().skip(2).next().unwrap().parse().unwrap();
-    let chunk_size: u64 = args().skip(3).next().unwrap().parse().ok().unwrap();
-    let test_file: Option<String> = args().skip(4).next();
+    let args = parse();
+    let path = args.value_of("train").unwrap();
+    let dims = value_t!(args, "dims", usize)
+        .expect("Required number of dims missing");
+    let chunk_size = value_t!(args, "chunk_size", u64)
+        .unwrap_or(64_000_000);
+    let lr = value_t!(args, "learning_rate", f64)
+        .unwrap_or(1.);
+    let passes = value_t!(args, "passes", u64)
+        .unwrap_or(10);
+    let validation = value_t!(args, "valid", String).ok();
+    let batch_size = value_t!(args, "batch_size", usize).unwrap_or(1);
+    let iterations = value_t!(args, "train-iters", u32).unwrap_or(1);
 
     let training_data = load_data(&path, dims, chunk_size);
-    println!("Number of parallel partitions: {}", training_data.n_partitions());
+    info!("Number of parallel partitions: {}", training_data.n_partitions());
 
-    let test_data = if let Some(test_path) = test_file {
-        load_data(&test_path, dims, chunk_size)
+    let valid_data = if let Some(valid_path) = validation {
+        load_data(&valid_path, dims, 1_000_000)
     } else {
         training_data.clone()
     };
+    info!("Number of test partitions: {}", valid_data.n_partitions());
     
     // Create our initial weight vector
     let mut w = Deferred::lift(vec![0f64; dims], None);
 
     let mut errors = Vec::new();
     let mut best_w = Vec::new();
-    for pass in 0..20 {
-        //let alpha = 0.5 / ((pass + 2) as f64).ln();
-        let alpha = 0.5;
-        let mut opts = SGDOptions::new(1, 2)
+    for pass in 0..passes {
+        let alpha = lr / (pass as f64 + 1.);
+        let mut opts = SGDOptions::new(iterations, batch_size)
             .learning_rule(LearningRule::Constant(alpha));
 
         //opts.set_class_weight(ClassWeight::Inverse);
@@ -80,7 +143,7 @@ fn main() {
             d.join(&w, move |td, v| {
                 let mut my_w = v.clone();
                 let training: Vec<_> = td.stream().into_iter().collect();
-                learn(&mut my_w, training, &opts);
+                learn(&mut my_w, &training, &opts);
                 (1u32, my_w)
             })
         }).collect();
@@ -107,7 +170,7 @@ fn main() {
         });
 
         // Test
-        let misclass: Vec<_> = test_data.to_defs().iter().map(|d| {
+        let misclass: Vec<_> = valid_data.to_defs().iter().map(|d| {
             d.join(&w, move |td, w| {
                 let training: Vec<_> = td.stream().into_iter().collect();
                 let res = test(w, &training);
@@ -119,6 +182,7 @@ fn main() {
         let n = misclass.len();
         let cur_error = sum.apply(move |s| {
             let err = s / (n as f64);
+            println!("Pass: {}, Error: {}", pass, err);
             vec![(pass, err)]
         });
         best_w.push(cur_error.join(&w, |err, cur_w| {
@@ -147,6 +211,21 @@ fn main() {
             println!("Pass: {}, Error: {}", p, err);
         }
         println!("Best: {}", best);
+
+        if let Some(test_path) = value_t!(args, "test", String).ok() {
+            let w = Deferred::lift(w, None);
+            let dfs = load_data(&test_path, dims, 64_000_000).to_defs().iter().map(|test| {
+                test.join(&w, |s, v| -> Vec<String> {
+                    s.stream().into_iter().map(|(X, y)| {
+                        let yi = if y { 1.0 } else { -1.0 };
+                        format!("{},{}", yi, dot(&X, v))
+                    }).collect()
+                })
+            }).collect();
+            MemoryCollection::from_defs(dfs)
+                .sink("/tmp/parlr")
+                .run(&gs);
+        }
     }
 
 }
