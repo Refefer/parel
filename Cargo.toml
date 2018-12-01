@@ -13,3 +13,10 @@ serde_derive = "1.0"
 env_logger = "0.5.10"
 clap = "2.26.0"
 log = "0.4.3"
+
+[[bin]]
+name = "par-lr"
+
+[lib]
+name = "parlr"
+path = "src/lib.rs"

@@ -97,6 +97,7 @@ impl SGDOptions {
     pub fn set_class_weight(&mut self, cw: ClassWeight) -> () {
         self.class_weight = cw;
     }
+
     pub fn set_sigmoid(&mut self, s: Sigmoid) -> () {
         self.sigmoid = s;
     }
@@ -165,69 +166,6 @@ pub fn learn(w: &mut Vec<f64>, input: &Vec<(Sparse, bool)>, options: &SGDOptions
         }
     }
 }
-
-/*
-#[allow(non_snake_case)]
-pub fn _learn(w: &mut Vec<f64>, Xy: Vec<(Sparse, bool)>, options: &SGDOptions) -> f64 {
-
-    let mut lr = options.learning_rule.clone();
-
-    // filter out empty vecs
-    let Xy: Vec<_> = Xy.into_iter().filter(|x| (x.0).len() > 0).collect();
-    let len = Xy.len();
-
-    // Importance weights - We use inverse proportion to scale the pos/negative weights
-    let (mut p_w, mut n_w) = match options.class_weight {
-        ClassWeight::None => (1f64, 1f64),
-        ClassWeight::Inverse => compute_balanced_weight(&Xy),
-        ClassWeight::Fixed(p_w, n_w) => (p_w, n_w)
-    };
-
-    let mut logloss = 0f64;
-    let mut c = 0f64;
-
-    let mut idxs: Vec<_> = (0usize..len).collect();
-    for iter in 0..options.iters {
-        logloss = 0.;
-        c = 0.;
-        let alpha = lr.get_lr();
-        thread_rng().shuffle(&mut idxs);
-        let mut cur_idx = 0usize;
-        while (cur_idx + options.batch_size) <= len {
-            let mut grads = vec![0f64; w.len()];
-            for _ in 0..options.batch_size {
-                let idx = idxs[cur_idx];
-                cur_idx += 1;
-                let (ref Xi, ref y) = Xy[idx];
-                let (yi, iw) = if *y { (1f64, p_w) } else { (0f64, n_w) };  
-
-                // forward pass
-                let y_hat = match options.sigmoid {
-                    Sigmoid::Hard => hard_sigmoid(dot(Xi, &w)),
-                    Sigmoid::Normal => sigmoid(dot(Xi, &w))
-                };
-
-                if iter + 1 == options.iters {
-                    let ll = log_loss(yi, clip(y_hat));
-                    logloss += ll;
-                    c += 1f64;
-                }
-
-                for &(idx, xi) in Xi.iter() {
-                    let g = (y_hat - yi) * xi; // * iw;
-                    grads[idx] += g;
-                }
-            }
-
-            for (idx, g) in grads.into_iter().enumerate() {
-                w[idx as usize] -= (g / options.batch_size as f64) * alpha;
-            }
-        }
-    }
-    logloss / c
-}
-
-*/
 
 pub fn test(w: &Vec<f64>, xy: &Vec<(Sparse, bool)>) -> (f64, f64) {
     let mut misclass = 0;
@@ -333,7 +271,8 @@ mod def_test {
     #[test]
     fn test_balanced_weight() {
         let v = vec![(1, true), (2, true), (3, true), (4, false)];
-        let (p_w, n_w) = compute_balanced_weight(&v);
+        let v_test = v.iter().collect();
+        let (p_w, n_w) = compute_balanced_weight(&v_test);
         assert_eq!(p_w, 2. / 3.);
         assert_eq!(n_w, 2.);
     }

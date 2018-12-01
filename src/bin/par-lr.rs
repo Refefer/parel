@@ -8,7 +8,7 @@ extern crate tange_collection;
 extern crate svmloader;
 extern crate env_logger;
 
-mod lr;
+extern crate parlr;
 
 use std::env::args;
 use std::sync::Arc;
@@ -25,7 +25,8 @@ use tange_collection::collection::disk::DiskCollection;
 use svmloader::types::SparseData;
 use svmloader::*;
 
-use lr::{SGDOptions,Sparse,learn,test,ClassWeight,LearningRule,VWRule,dot};
+use parlr::lr::{SGDOptions,Sparse,learn,test,ClassWeight,LearningRule,VWRule,dot};
+
 fn parse<'a>() -> ArgMatches<'a> {
   App::new("par-lr")
     .version("0.0.1")
@@ -77,6 +78,13 @@ fn parse<'a>() -> ArgMatches<'a> {
         .short("c")
         .takes_value(true)
         .help("Partition size to use for dataset"))
+    .arg(Arg::with_name("balanced-weighting")
+        .long("balanced")
+        .short("b")
+        .help("Scales loss inverse to the number of classes"))
+    .arg(Arg::with_name("logloss")
+        .long("logloss")
+        .help("Selects based on logloss rather than accuracy"))
     .get_matches()
 }
 
@@ -104,6 +112,8 @@ fn main() {
         .expect("Required number of dims missing");
     let chunk_size = value_t!(args, "chunk_size", u64)
         .unwrap_or(64_000_000);
+    assert!(chunk_size > 0, "chunk_size needs to be greater than 1!");
+
     let lr = value_t!(args, "learning_rate", f64)
         .unwrap_or(1.);
     let passes = value_t!(args, "passes", u64)
@@ -111,6 +121,7 @@ fn main() {
     let validation = value_t!(args, "valid", String).ok();
     let batch_size = value_t!(args, "batch_size", usize).unwrap_or(1);
     let iterations = value_t!(args, "train-iters", u32).unwrap_or(1);
+    let logloss    = args.is_present("logloss");
 
     let training_data = load_data(&path, dims, chunk_size);
     info!("Number of parallel partitions: {}", training_data.n_partitions());
@@ -120,7 +131,7 @@ fn main() {
     } else {
         training_data.clone()
     };
-    info!("Number of test partitions: {}", valid_data.n_partitions());
+    info!("Number of valid partitions: {}", valid_data.n_partitions());
     
     // Create our initial weight vector
     let mut w = Deferred::lift(vec![0f64; dims], None);
@@ -128,12 +139,20 @@ fn main() {
     let mut errors = Vec::new();
     let mut best_w = Vec::new();
     for pass in 0..passes {
-        let alpha = lr / (pass as f64 + 1.);
+        //let alpha = lr / (2. * pass as f64 + 1.);
+        //let alpha = 1. / (lr * (pass as f64 + 1.));
+        let alpha = lr;
         let mut opts = SGDOptions::new(iterations, batch_size)
             .learning_rule(LearningRule::Constant(alpha));
+            //.learning_rule(LearningRule::Exponential(alpha, 0.999));
+            //.learning_rule(VWRule::new(alpha, 0.5));
 
-        //opts.set_class_weight(ClassWeight::Inverse);
-        opts.set_class_weight(ClassWeight::None);
+        if args.is_present("balanced-weighting") {
+            opts.set_class_weight(ClassWeight::Inverse);
+        } else {
+            opts.set_class_weight(ClassWeight::None);
+        }
+
         opts.set_seed(pass + 1);
         let sgd = Arc::new(opts);
 
@@ -174,7 +193,7 @@ fn main() {
             d.join(&w, move |td, w| {
                 let training: Vec<_> = td.stream().into_iter().collect();
                 let res = test(w, &training);
-                res.0
+                if logloss { res.1 } else { res.0 }
             })
         }).collect();
 
@@ -222,6 +241,7 @@ fn main() {
                     }).collect()
                 })
             }).collect();
+
             MemoryCollection::from_defs(dfs)
                 .sink("/tmp/parlr")
                 .run(&gs);
