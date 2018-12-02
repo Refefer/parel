@@ -12,7 +12,6 @@ extern crate parlr;
 
 use std::env::args;
 use std::sync::Arc;
-use std::fs;
 
 use clap::{Arg, App, SubCommand, ArgMatches};
 use tange::deferred::{Deferred, tree_reduce};
@@ -85,12 +84,16 @@ fn parse<'a>() -> ArgMatches<'a> {
     .arg(Arg::with_name("logloss")
         .long("logloss")
         .help("Selects based on logloss rather than accuracy"))
+    .arg(Arg::with_name("lr-decay")
+        .long("decay")
+        .takes_value(true)
+        .help("Learning rate decay for each pass through the data"))
+
     .get_matches()
 }
 
 
 fn load_data(path: &str, dims: usize, chunk_size: u64) -> DiskCollection<(Vec<(usize, f64)>, bool)> {
-    let md = fs::metadata(path).expect("Error reading file!");
     let col = read_text(path, chunk_size).expect("File missing!");
     let sd = SparseData(dims);
     //let mut training_data = col.emit(move |s, emitter| {
@@ -122,6 +125,7 @@ fn main() {
     let batch_size = value_t!(args, "batch_size", usize).unwrap_or(1);
     let iterations = value_t!(args, "train-iters", u32).unwrap_or(1);
     let logloss    = args.is_present("logloss");
+    let decay = value_t!(args, "lr-decay", f64).unwrap_or(1.);
 
     let training_data = load_data(&path, dims, chunk_size);
     info!("Number of parallel partitions: {}", training_data.n_partitions());
@@ -141,7 +145,7 @@ fn main() {
     for pass in 0..passes {
         //let alpha = lr / (2. * pass as f64 + 1.);
         //let alpha = 1. / (lr * (pass as f64 + 1.));
-        let alpha = lr;
+        let alpha = lr * decay.powi(pass as i32);
         let mut opts = SGDOptions::new(iterations, batch_size)
             .learning_rule(LearningRule::Constant(alpha));
             //.learning_rule(LearningRule::Exponential(alpha, 0.999));
