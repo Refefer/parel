@@ -11,6 +11,9 @@ extern crate env_logger;
 extern crate parlr;
 
 use std::sync::Arc;
+use std::fs;
+use std::io::{self};
+use std::io::prelude::*;
 
 use clap::{Arg, App, ArgMatches};
 use tange::deferred::{Deferred, tree_reduce};
@@ -33,6 +36,11 @@ fn parse<'a>() -> ArgMatches<'a> {
         .index(1)
         .required(true)
         .help("Training File"))
+    .arg(Arg::with_name("partition-size")
+        .long("partition-size")
+        .short("p")
+        .takes_value(true)
+        .help("Partition size to use for dataset"))
     .arg(Arg::with_name("dims")
         .long("dims")
         .short("d")
@@ -44,12 +52,18 @@ fn parse<'a>() -> ArgMatches<'a> {
         .short("v")
         .takes_value(true)
         .help("Validation file"))
+    .arg(Arg::with_name("valid-partition-size")
+        .long("validation-partition-size")
+        .takes_value(true)
+        .help("Size of each partition for validation.  If omitted, uses same as train"))
     .arg(Arg::with_name("test")
         .long("test")
         .short("t")
         .takes_value(true)
-        .help("test file"))
-
+        .multiple(true)
+        .min_values(2)
+        .max_values(2)
+        .help("Requires two arguments: Test dataset and directory to output scores"))
     .arg(Arg::with_name("learning_rate")
         .long("learning-rate")
         .short("lr")
@@ -70,11 +84,6 @@ fn parse<'a>() -> ArgMatches<'a> {
         .short("i")
         .takes_value(true)
         .help("Number of epochs for an inner pass"))
-    .arg(Arg::with_name("chunk_size")
-        .long("chunk-size")
-        .short("c")
-        .takes_value(true)
-        .help("Partition size to use for dataset"))
     .arg(Arg::with_name("balanced-weighting")
         .long("balanced")
         .short("b")
@@ -90,13 +99,19 @@ fn parse<'a>() -> ArgMatches<'a> {
         .long("hard-sigmoid")
         .short("s")
         .help("Uses a sigmoid approximation for speed up"))
-
+    .arg(Arg::with_name("model-out-file")
+        .long("model-out")
+        .takes_value(true)
+        .help("Write out model to the given file"))
+    .arg(Arg::with_name("model-in-file")
+        .long("model-in")
+        .takes_value(true)
+        .help("If provided, reads a model from disk as starting point"))
     .get_matches()
 }
 
-
-fn load_data(path: &str, dims: usize, chunk_size: u64) -> DiskCollection<(Vec<(usize, f64)>, bool)> {
-    let col = read_text(path, chunk_size).expect("File missing!");
+fn load_data(path: &str, dims: usize, part_size: u64) -> DiskCollection<(Vec<(usize, f64)>, bool)> {
+    let col = read_text(path, part_size).expect("File missing!");
     let sd = SparseData(dims);
     //let mut training_data = col.emit(move |s, emitter| {
     col.emit_to_disk("/tmp/par-lr".into(), move |s, emitter| {
@@ -109,15 +124,50 @@ fn load_data(path: &str, dims: usize, chunk_size: u64) -> DiskCollection<(Vec<(u
     })
 }
 
+fn write_model(path: &str, w: &[f64]) -> io::Result<()> {
+    let f = fs::File::create(path)?;
+    let mut bw = io::BufWriter::new(f);
+    let nl = [10u8];
+    for (i, v) in w.iter().enumerate() {
+        if *v != 0. {
+            bw.write(format!("{}:{:.5}", i, v).as_bytes())?;
+            if i + 1 != w.len() {
+                bw.write(&nl)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_model(path: &str, w: &mut [f64]) -> io::Result<()> {
+    let f = fs::File::open(path)?;
+    let bw = io::BufReader::new(f);
+    for line in bw.lines().map(|l| l.unwrap()) {
+        let mut it = line.split(":");
+        let idx: usize = it.next()
+            .expect("Bad model format!")
+            .parse()
+            .expect("Index is not a number!");
+
+        let v: f64 = it.next()
+            .expect("Bad model format!")
+            .parse()
+            .expect("value is not a number!");
+
+        w[idx] = v;
+    }
+    Ok(())
+}
+
 fn main() {
     env_logger::init();
     let args = parse();
     let path = args.value_of("train").unwrap();
     let dims = value_t!(args, "dims", usize)
         .expect("Required number of dims missing");
-    let chunk_size = value_t!(args, "chunk_size", u64)
+    let part_size = value_t!(args, "partition-size", u64)
         .unwrap_or(64_000_000);
-    assert!(chunk_size > 0, "chunk_size needs to be greater than 1!");
+    assert!(part_size > 0, "`partition-size` needs to be greater than 1!");
 
     let lr = value_t!(args, "learning_rate", f64)
         .unwrap_or(1.);
@@ -129,19 +179,29 @@ fn main() {
     let logloss    = args.is_present("logloss");
     let decay      = value_t!(args, "lr-decay", f64).unwrap_or(1.);
     let hard_sigmoid = args.is_present("hard-sigmoid");
+    let model_out  = value_t!(args, "model-out-file", String).ok();
+    let model_in  = value_t!(args, "model-in-file", String).ok();
 
-    let training_data = load_data(&path, dims, chunk_size);
+    let training_data = load_data(&path, dims, part_size);
     info!("Number of parallel partitions: {}", training_data.n_partitions());
 
     let valid_data = if let Some(valid_path) = validation {
-        load_data(&valid_path, dims, 1_000_000)
+        let v_part_size = value_t!(args, "validation-partition-size", u64)
+            .unwrap_or(part_size);
+        load_data(&valid_path, dims, v_part_size)
     } else {
         training_data.clone()
     };
     info!("Number of valid partitions: {}", valid_data.n_partitions());
     
     // Create our initial weight vector
-    let mut w = Deferred::lift(vec![0f64; dims], None);
+    let mut v = vec![0f64; dims];
+    if let Some(model_in_path) = model_in {
+        read_model(&model_in_path, &mut v)
+            .expect("Unable to read model!");
+    }
+
+    let mut w = Deferred::lift(v, None);
 
     let mut errors = Vec::new();
     let mut best_w = Vec::new();
@@ -238,9 +298,19 @@ fn main() {
         }
         println!("Best: {}", best);
 
-        if let Some(test_path) = value_t!(args, "test", String).ok() {
+        // Write out model
+        if let Some(model_path) = model_out {
+            write_model(&model_path, &w)
+                .expect("Unable to write model to disk!");
+        }
+
+        // predict files into directory
+        if let Some(tester) = values_t!(args, "test", String).ok() {
+            let test_path = &tester[0];
+            let output_dir = tester[1].to_owned();
             let w = Deferred::lift(w, None);
-            let dfs = load_data(&test_path, dims, 64_000_000).to_defs().iter().map(|test| {
+            let td = load_data(test_path, dims, part_size);
+            let dfs = td.to_defs().iter().map(|test| {
                 test.join(&w, |s, v| -> Vec<String> {
                     s.stream().into_iter().map(|(x, y)| {
                         let yi = if y { 1.0 } else { -1.0 };
@@ -250,9 +320,8 @@ fn main() {
             }).collect();
 
             MemoryCollection::from_defs(dfs)
-                .sink("/tmp/parlr")
+                .sink(&output_dir)
                 .run(&gs);
         }
     }
-
 }
