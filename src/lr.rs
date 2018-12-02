@@ -79,7 +79,7 @@ impl SGDOptions {
             batch_size: batch_size,
             seed: 1234,
             class_weight: ClassWeight::None,
-            sigmoid: Sigmoid::Hard,
+            sigmoid: Sigmoid::Normal,
             learning_rule: LearningRule::Constant(1.)
         }
     }

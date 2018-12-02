@@ -22,7 +22,7 @@ use tange_collection::collection::disk::DiskCollection;
 use svmloader::types::SparseData;
 use svmloader::*;
 
-use parlr::lr::{SGDOptions,learn,test,ClassWeight,LearningRule,dot};
+use parlr::lr::{SGDOptions,learn,test,ClassWeight,LearningRule,dot,Sigmoid};
 
 fn parse<'a>() -> ArgMatches<'a> {
   App::new("par-lr")
@@ -86,6 +86,10 @@ fn parse<'a>() -> ArgMatches<'a> {
         .long("decay")
         .takes_value(true)
         .help("Learning rate decay for each pass through the data"))
+    .arg(Arg::with_name("hard-sigmoid")
+        .long("hard-sigmoid")
+        .short("s")
+        .help("Uses a sigmoid approximation for speed up"))
 
     .get_matches()
 }
@@ -123,7 +127,8 @@ fn main() {
     let batch_size = value_t!(args, "batch_size", usize).unwrap_or(1);
     let iterations = value_t!(args, "train-iters", u32).unwrap_or(1);
     let logloss    = args.is_present("logloss");
-    let decay = value_t!(args, "lr-decay", f64).unwrap_or(1.);
+    let decay      = value_t!(args, "lr-decay", f64).unwrap_or(1.);
+    let hard_sigmoid = args.is_present("hard-sigmoid");
 
     let training_data = load_data(&path, dims, chunk_size);
     info!("Number of parallel partitions: {}", training_data.n_partitions());
@@ -141,13 +146,13 @@ fn main() {
     let mut errors = Vec::new();
     let mut best_w = Vec::new();
     for pass in 0..passes {
-        //let alpha = lr / (2. * pass as f64 + 1.);
-        //let alpha = 1. / (lr * (pass as f64 + 1.));
         let alpha = lr * decay.powi(pass as i32);
         let mut opts = SGDOptions::new(iterations, batch_size)
             .learning_rule(LearningRule::Constant(alpha));
-            //.learning_rule(LearningRule::Exponential(alpha, 0.999));
-            //.learning_rule(VWRule::new(alpha, 0.5));
+
+        if hard_sigmoid {
+            opts.set_sigmoid(Sigmoid::Hard);
+        }
 
         if args.is_present("balanced-weighting") {
             opts.set_class_weight(ClassWeight::Inverse);
