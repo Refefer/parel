@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["refefer <refefer@gmail.com>"]
 
 [dependencies]
-tange-collection = { path = "/home/andrew/sandbox/tange/tange-collection" }
+tange-collection = "0.1"
 tange = "0.1"
 svmloader = { git = "https://github.com/Refefer/svm-loader" }
 rand_xorshift = "0.1"

@@ -212,7 +212,7 @@ fn log_loss(y: f64, y_hat: f64) -> f64 {
 }
 
 pub fn dot(x: &Sparse, w: &[f64]) -> f64 {
-    if is_x86_feature_detected!("avx") {
+    if is_x86_feature_detected!("avx2") {
         unsafe { dot_avx(x, w) }
     } else {
         dot_basic(x, w)
@@ -230,7 +230,7 @@ fn dot_basic(x: &Sparse, w: &[f64]) -> f64 {
 }
 
 /// AVX based dot product
-#[target_feature(enable = "avx")]
+#[target_feature(enable = "avx2")]
 unsafe fn dot_avx(x: &[(usize, f64)], w: &[f64]) -> f64 {
     let mut sum = 0.0;
     let mut i = 0;
