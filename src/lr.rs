@@ -1,13 +1,12 @@
 
 extern crate rand;
-extern crate core;
 
 use std::arch::x86_64::*;
 use std::mem;
-use std::collections::HashMap;
 use std::f64::consts::E;
 use self::rand::prelude::*;
 use self::rand::{XorShiftRng,SeedableRng};
+use self::rand::seq::SliceRandom;
 
 #[derive(Clone)]
 pub enum ClassWeight {
@@ -140,7 +139,7 @@ pub fn learn(w: &mut Vec<f64>, input: &Vec<(Sparse, bool)>, options: &SGDOptions
         let alpha = lr.get_lr();
         for _ in 0..options.batch_size {
             if cur_idx == 0 {
-                rng.shuffle(&mut idxs);
+                idxs.as_mut_slice().shuffle(&mut rng);
             };
             cur_idx = (cur_idx + 1) % len;
             let idx = idxs[cur_idx];

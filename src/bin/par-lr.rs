@@ -10,13 +10,11 @@ extern crate env_logger;
 
 extern crate parlr;
 
-use std::env::args;
 use std::sync::Arc;
 
-use clap::{Arg, App, SubCommand, ArgMatches};
+use clap::{Arg, App, ArgMatches};
 use tange::deferred::{Deferred, tree_reduce};
 use tange::scheduler::GreedyScheduler;
-use tange::scheduler::LeveledScheduler;
 use tange_collection::utils::read_text;
 use tange_collection::interfaces::Stream;
 use tange_collection::collection::memory::MemoryCollection;
@@ -24,7 +22,7 @@ use tange_collection::collection::disk::DiskCollection;
 use svmloader::types::SparseData;
 use svmloader::*;
 
-use parlr::lr::{SGDOptions,Sparse,learn,test,ClassWeight,LearningRule,VWRule,dot};
+use parlr::lr::{SGDOptions,learn,test,ClassWeight,LearningRule,dot};
 
 fn parse<'a>() -> ArgMatches<'a> {
   App::new("par-lr")
@@ -239,9 +237,9 @@ fn main() {
             let w = Deferred::lift(w, None);
             let dfs = load_data(&test_path, dims, 64_000_000).to_defs().iter().map(|test| {
                 test.join(&w, |s, v| -> Vec<String> {
-                    s.stream().into_iter().map(|(X, y)| {
+                    s.stream().into_iter().map(|(x, y)| {
                         let yi = if y { 1.0 } else { -1.0 };
-                        format!("{},{}", yi, dot(&X, v))
+                        format!("{},{}", yi, dot(&x, v))
                     }).collect()
                 })
             }).collect();
