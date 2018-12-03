@@ -41,6 +41,11 @@ fn parse<'a>() -> ArgMatches<'a> {
         .short("p")
         .takes_value(true)
         .help("Partition size to use for dataset"))
+    .arg(Arg::with_name("parts-per-update")
+        .long("parts-per-update")
+        .short("u")
+        .takes_value(true)
+        .help("Number of partitions to process before updating.  If omitted, uses all"))
     .arg(Arg::with_name("dims")
         .long("dims")
         .short("d")
@@ -159,6 +164,29 @@ fn read_model(path: &str, w: &mut [f64]) -> io::Result<()> {
     Ok(())
 }
 
+fn average_ws(ws: &[Deferred<(u32, Vec<f64>)>]) -> Deferred<Vec<f64>> {
+    // Average Ws together
+    let avg_w = tree_reduce(&ws, |(c1, left), (c2, right)| {
+        let c3 = c1 + c2;
+        let mut out: Vec<_> = left.clone();
+        for i in 0..left.len() {
+            out[i] += right[i];
+        }
+        (c3, out)
+    }).unwrap();
+
+    avg_w.apply(|(count, v)| {
+        let mut w = v.clone();
+        let c = *count as f64;
+        if c > 1. {
+            for i in 0..w.len() {
+                w[i] /= c;
+            }
+        }
+        w
+    })
+}
+
 fn main() {
     env_logger::init();
     let args = parse();
@@ -167,7 +195,10 @@ fn main() {
         .expect("Required number of dims missing");
     let part_size = value_t!(args, "partition-size", u64)
         .unwrap_or(64_000_000);
-    assert!(part_size > 0, "`partition-size` needs to be greater than 1!");
+    assert!(part_size > 0, "`partition-size` needs to be greater than 0!");
+    let ppu = value_t!(args, "parts-per-update", usize).ok();
+    assert!(ppu.is_none() || ppu > Some(0), 
+            "`parts-per-update` needs to be greater than 0!");
 
     let lr = value_t!(args, "learning_rate", f64)
         .unwrap_or(1.);
@@ -193,6 +224,14 @@ fn main() {
         training_data.clone()
     };
     info!("Number of valid partitions: {}", valid_data.n_partitions());
+
+    // Group our training data into sub-batches
+    let part_batches: Vec<_> = if let Some(parts) = ppu {
+        training_data.to_defs().chunks(parts).collect()
+    } else {
+        vec![training_data.to_defs()]
+    };
+    info!("Global updates per pass: {}", part_batches.len());
     
     // Create our initial weight vector
     let mut v = vec![0f64; dims];
@@ -200,12 +239,12 @@ fn main() {
         read_model(&model_in_path, &mut v)
             .expect("Unable to read model!");
     }
-
     let mut w = Deferred::lift(v, None);
 
     let mut errors = Vec::new();
     let mut best_w = Vec::new();
     for pass in 0..passes {
+        // Build our options
         let alpha = lr * decay.powi(pass as i32);
         let mut opts = SGDOptions::new(iterations, batch_size)
             .learning_rule(LearningRule::Constant(alpha));
@@ -223,37 +262,22 @@ fn main() {
         opts.set_seed(pass + 1);
         let sgd = Arc::new(opts);
 
+        // *
         // Train
-        let out: Vec<_> = training_data.to_defs().iter().map(|d| {
-            let opts = sgd.clone();
-            d.join(&w, move |td, v| {
-                let mut my_w = v.clone();
-                let training: Vec<_> = td.stream().into_iter().collect();
-                learn(&mut my_w, &training, &opts);
-                (1u32, my_w)
-            })
-        }).collect();
+        // *
+        for batch in part_batches.iter() {
+            let out: Vec<_> = batch.iter().map(|d| {
+                let opts = sgd.clone();
+                d.join(&w, move |td, v| {
+                    let mut my_w = v.clone();
+                    let training: Vec<_> = td.stream().into_iter().collect();
+                    learn(&mut my_w, &training, &opts);
+                    (1u32, my_w)
+                })
+            }).collect();
 
-        // Average Ws together
-        let avg_w = tree_reduce(&out, |(c1, left), (c2, right)| {
-            let c3 = c1 + c2;
-            let mut out: Vec<_> = left.clone();
-            for i in 0..left.len() {
-                out[i] += right[i];
-            }
-            (c3, out)
-        }).unwrap();
-
-        w = avg_w.apply(|(count, v)| {
-            let mut w = v.clone();
-            let c = *count as f64;
-            if c > 1. {
-                for i in 0..w.len() {
-                    w[i] /= c;
-                }
-            }
-            w
-        });
+            w = average_ws(&out);
+        }
 
         // Test
         let misclass: Vec<_> = valid_data.to_defs().iter().map(|d| {
