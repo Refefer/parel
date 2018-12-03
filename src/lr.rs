@@ -4,7 +4,6 @@ extern crate rand;
 use std::arch::x86_64::*;
 use std::mem;
 use std::f64::consts::E;
-use self::rand::prelude::*;
 use self::rand::{XorShiftRng,SeedableRng};
 use self::rand::seq::SliceRandom;
 

@@ -7,6 +7,7 @@ extern crate tange;
 extern crate tange_collection;
 extern crate svmloader;
 extern crate env_logger;
+extern crate rand;
 
 extern crate parlr;
 
@@ -24,6 +25,8 @@ use tange_collection::collection::memory::MemoryCollection;
 use tange_collection::collection::disk::DiskCollection;
 use svmloader::types::SparseData;
 use svmloader::*;
+use rand::{XorShiftRng,SeedableRng};
+use rand::seq::SliceRandom;
 
 use parlr::lr::{SGDOptions,learn,test,ClassWeight,LearningRule,dot,Sigmoid};
 
@@ -112,6 +115,11 @@ fn parse<'a>() -> ArgMatches<'a> {
         .long("model-in")
         .takes_value(true)
         .help("If provided, reads a model from disk as starting point"))
+    .arg(Arg::with_name("seed")
+        .long("set-seed")
+        .takes_value(true)
+        .help("Random seed to use"))
+
     .get_matches()
 }
 
@@ -212,7 +220,11 @@ fn main() {
     let hard_sigmoid = args.is_present("hard-sigmoid");
     let model_out  = value_t!(args, "model-out-file", String).ok();
     let model_in  = value_t!(args, "model-in-file", String).ok();
+    let seed = value_t!(args, "seed", u64).unwrap_or(2019);
 
+    /*
+    Load training and validation datasets
+    */
     let training_data = load_data(&path, dims, part_size);
     info!("Number of parallel partitions: {}", training_data.n_partitions());
 
@@ -225,13 +237,12 @@ fn main() {
     };
     info!("Number of valid partitions: {}", valid_data.n_partitions());
 
-    // Group our training data into sub-batches
-    let part_batches: Vec<_> = if let Some(parts) = ppu {
-        training_data.to_defs().chunks(parts).collect()
-    } else {
-        vec![training_data.to_defs()]
-    };
-    info!("Global updates per pass: {}", part_batches.len());
+    // How many partitions are we using?
+    let part_batches = ppu.unwrap_or(training_data.n_partitions());
+    let n_parts = ((training_data.to_defs().len() as f64) 
+        / (part_batches as f64)).ceil() as usize;
+
+    info!("Global updates per pass: {}", n_parts);
     
     // Create our initial weight vector
     let mut v = vec![0f64; dims];
@@ -243,6 +254,7 @@ fn main() {
 
     let mut errors = Vec::new();
     let mut best_w = Vec::new();
+    let mut rng = XorShiftRng::seed_from_u64(seed);
     for pass in 0..passes {
         // Build our options
         let alpha = lr * decay.powi(pass as i32);
@@ -265,7 +277,12 @@ fn main() {
         // *
         // Train
         // *
-        for batch in part_batches.iter() {
+        // Shuffle our training partitions
+        // Group our training data into sub-batches
+        let mut train_defs = training_data.to_defs().clone();
+        train_defs.as_mut_slice().shuffle(&mut rng);
+
+        for batch in train_defs.chunks(part_batches) {
             let out: Vec<_> = batch.iter().map(|d| {
                 let opts = sgd.clone();
                 d.join(&w, move |td, v| {
