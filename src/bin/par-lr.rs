@@ -209,14 +209,14 @@ fn main() {
             "`parts-per-update` needs to be greater than 0!");
 
     let lr = value_t!(args, "learning_rate", f64)
-        .unwrap_or(1.);
+        .unwrap_or(10.);
     let passes = value_t!(args, "passes", u64)
         .unwrap_or(10);
     let validation = value_t!(args, "valid", String).ok();
-    let batch_size = value_t!(args, "batch_size", usize).unwrap_or(1);
+    let batch_size = value_t!(args, "batch_size", usize).unwrap_or(4);
     let iterations = value_t!(args, "train-iters", u32).unwrap_or(1);
     let logloss    = args.is_present("logloss");
-    let decay      = value_t!(args, "lr-decay", f64).unwrap_or(1.);
+    let decay      = value_t!(args, "lr-decay", f64).unwrap_or(.6);
     let hard_sigmoid = args.is_present("hard-sigmoid");
     let model_out  = value_t!(args, "model-out-file", String).ok();
     let model_in  = value_t!(args, "model-in-file", String).ok();
@@ -226,7 +226,7 @@ fn main() {
     Load training and validation datasets
     */
     let training_data = load_data(&path, dims, part_size);
-    info!("Number of parallel partitions: {}", training_data.n_partitions());
+    info!("Number of training partitions: {}", training_data.n_partitions());
 
     let valid_data = if let Some(valid_path) = validation {
         let v_part_size = value_t!(args, "validation-partition-size", u64)
@@ -271,7 +271,7 @@ fn main() {
             opts.set_class_weight(ClassWeight::None);
         }
 
-        opts.set_seed(pass + 1);
+        opts.set_seed(pass + seed);
         let sgd = Arc::new(opts);
 
         // *
